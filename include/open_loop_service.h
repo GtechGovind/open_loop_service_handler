@@ -1441,14 +1441,7 @@ namespace open_loop {
              * @note The `explicit` keyword prevents implicit conversions (e.g., from an integer),
              *       which improves type safety.
              */
-            explicit container(const std::time_t card_effective_date_in_minutes) noexcept
-                : card_effective_date_(card_effective_date_in_minutes) {
-                // The constructor immediately propagates the effective date to its time-sensitive
-                // child objects. This ensures that the container and its parts are always in a
-                // consistent state from the moment of creation.
-                validation_.set_card_effective_date(card_effective_date_in_minutes);
-                history_.set_card_effective_date(card_effective_date_in_minutes);
-            }
+            container() = default;
 
             /**
              * @brief Sets the `general` data block for the CSA.
@@ -1952,6 +1945,8 @@ namespace open_loop {
             static constexpr uint32_t TERMINAL_ID_MAX = 0xFFFFFF;
             //! The maximum value for the RFU field (stored in 4 bits: 2^4 - 1).
             static constexpr uint8_t RFU_MAX = 0x0F;
+            //! The required length of a terminal ID hex string (2 chars per byte for 3 bytes).
+            static constexpr size_t TERMINAL_ID_HEX_LENGTH = 6;
 
             /**
              * @brief Default constructor. Creates a record with all fields initialized to zero.
@@ -1995,13 +1990,32 @@ namespace open_loop {
             }
 
             /**
-             * @brief Sets the Terminal ID.
-             * @param id The terminal's unique identifier. What to send: A value in the range [0, 0xFFFFFF].
-             * @throws std::out_of_range if the ID exceeds the 24-bit limit.
+             * @brief Sets the Terminal ID from a hexadecimal string.
+             * @param hex_id The terminal's unique identifier as a hex string.
+             *               What to send: A 6-character, case-insensitive string containing only
+             *               hexadecimal characters (0-9, A-F). Example: "1122AA".
+             * @throws std::invalid_argument if `hex_id` is not exactly 6 characters long.
+             * @throws std::out_of_range if `hex_id` contains invalid characters or represents a value > 0xFFFFFF.
              */
-            void set_terminal_id(const uint32_t id) {
-                if (id > TERMINAL_ID_MAX) throw std::out_of_range("Terminal ID exceeds 24-bit limit.");
-                terminal_id_ = id;
+            void set_terminal_id(const std::string& hex_id) {
+                // First, perform a quick and inexpensive check on the string length.
+                if (hex_id.size() != TERMINAL_ID_HEX_LENGTH)
+                    throw std::invalid_argument("Terminal ID hex string must be exactly 6 characters.");
+
+                // Use a stringstream for a robust conversion from hex string to an integer.
+                unsigned long long value = 0;
+                std::stringstream ss;
+                ss << std::hex << hex_id; // Tell the stream to interpret the input as hexadecimal.
+
+                // Try to extract the value and perform comprehensive validation.
+                // 1. `!(ss >> value)`: Fails if the string contains non-hex characters (e.g., "A1B2G3").
+                // 2. `ss.rdbuf()->in_avail() != 0`: Fails if there are leftover characters after a valid parse,
+                //    which handles cases where the stream stops parsing early.
+                // 3. `value > TERMINAL_ID_MAX`: Fails if the parsed number exceeds the 24-bit limit.
+                if (!(ss >> value) || ss.rdbuf()->in_avail() != 0 || value > TERMINAL_ID_MAX)
+                    throw std::out_of_range("Terminal ID string is invalid or its value is out of the 24-bit range.");
+                // If all checks pass, safely cast and assign the value.
+                terminal_id_ = static_cast<uint32_t>(value);
             }
 
             /**
@@ -2745,12 +2759,7 @@ namespace open_loop {
              * @param card_effective_date_in_minutes The card's effective date. What to send: A `std::time_t`
              *                                       value representing minutes since the Unix epoch.
              */
-            explicit container(const std::time_t card_effective_date_in_minutes) noexcept
-                : card_effective_date_(card_effective_date_in_minutes) {
-                // Immediately propagate the effective date to ensure a consistent state.
-                validation_.set_card_effective_date(card_effective_date_in_minutes);
-                history_.set_card_effective_date(card_effective_date_in_minutes);
-            }
+            container() = default;
 
             void set_general(const general& gen) noexcept {
                 general_ = gen;
