@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.15)
 # Define the project with its name, version, and a brief description.
 # This information is used by IDEs and packaging tools.
 project(open_loop_service_handler
-        VERSION             1.0.0
+        VERSION             1.0.1
         DESCRIPTION         "A C++ library for parsing and serializing Open-Loop Transit Card data (CSA & OSA)."
         LANGUAGES           CXX
 )
