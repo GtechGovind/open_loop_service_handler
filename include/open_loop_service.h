@@ -1370,15 +1370,12 @@ namespace open_loop {
             std::optional<std::time_t> card_effective_date_in_minutes_;
         };
 
-       /**
+        /**
          * @class container
          * @brief Represents the complete 96-byte Common Service Area with all functionality fully encapsulated.
          *
-         * @details This class is the top-level wrapper that orchestrates the `general`, `validation`,
-         *          and `history` data blocks, along with the final RFU bytes. It provides a single
-         *          point of entry for parsing and serializing the entire 96-byte card data structure.
-         *          Its primary responsibility is to ensure data consistency, especially for the time-sensitive
-         *          `card_effective_date` that is shared across multiple child objects.
+         * @details This class is the top-level wrapper that orchestrates all CSA components. It is designed to
+         *          be created with a default constructor and then configured using public setter methods.
          *
          *          The 96-byte layout is as follows:
          *          - **Bytes 0-1**: `general` data (2 bytes)
@@ -1386,206 +1383,145 @@ namespace open_loop {
          *          - **Bytes 21-88**: `history` data (4 logs, 68 bytes)
          *          - **Bytes 89-95**: RFU (Reserved for Future Use, 7 bytes)
          *
-         * @warning An object of this class **must** be constructed with a `card_effective_date`, which
-         *          governs all time-based calculations and is enforced for all child objects.
+         * @warning Before performing any time-based operations (like parsing), you **must** call
+         *          `set_card_effective_date()`. This date governs all time-based calculations and is
+         *          essential for the object to function correctly.
          *
          * @usage
          * @code
-         *     // 1. Define the card's effective date in minutes since the Unix epoch.
+         *     // 1. Create the main CSA container using the default constructor.
+         *     csa::container my_csa;
+         *
+         *     // 2. CRITICAL: Set the card's effective date before any other operations.
          *     time_t effective_date = 28399680;
+         *     my_csa.set_card_effective_date(effective_date);
          *
-         *     // 2. Create the main CSA container. The date is mandatory.
-         *     csa::container my_csa(effective_date);
+         *     // 3. Populate the data.
+         *     my_csa.get_general().set_version(1, 1, 0);
+         *     my_csa.get_validation().set_fare_amount(1500);
          *
-         *     // 3. Set the general data.
-         *     my_csa.get_general().set_version(1, 0, 0); // Modify the child object directly.
+         *     // 4. Serialize, parse, and verify.
+         *     std::vector<uint8_t> bytes = my_csa.to_bytes();
          *
-         *     // 4. Set the validation data. Note that the container's constructor
-         *     //    has already set the effective date on this object.
-         *     my_csa.get_validation().set_date_and_time(1704067200000ULL);
-         *     my_csa.get_validation().set_fare_amount(120);
+         *     csa::container parsed_csa;
+         *     parsed_csa.set_card_effective_date(effective_date); // Must also be set before parsing.
+         *     parsed_csa.parse(bytes); // Note: parse is now a member function.
          *
-         *     // 5. Serialize the entire 96-byte structure to a byte vector.
-         *     std::vector<uint8_t> bytes_to_write = my_csa.to_bytes();
-         *
-         *     // 6. Parse the byte vector back into an object.
-         *     csa::container parsed_csa = csa::container::parse(bytes_to_write, effective_date);
+         *     assert(my_csa == parsed_csa);
          * @endcode
          */
         class container {
         public:
-
-            //! The fixed total size of the entire CSA block in bytes.
             static constexpr size_t TOTAL_SIZE = 96;
-            //! The size of the final RFU (Reserved for Future Use) block in bytes.
             static constexpr size_t RFU_SIZE = 7;
-
-            // --- Offsets for Data Slicing ---
-            // These constants define the starting position of each data block within the 96-byte array.
-            // This makes the parsing and serialization logic clear and easy to maintain.
-
-            //! The starting byte position of the `general` data block.
             static constexpr size_t GENERAL_OFFSET = 0;
-            //! The starting byte position of the `validation` data block.
             static constexpr size_t VALIDATION_OFFSET = GENERAL_OFFSET + general::DATA_SIZE; // Offset 2
-            //! The starting byte position of the `history` data block.
             static constexpr size_t HISTORY_OFFSET = VALIDATION_OFFSET + validation::DATA_SIZE; // Offset 21
-            //! The starting byte position of the RFU data block.
             static constexpr size_t RFU_OFFSET = HISTORY_OFFSET + history::TOTAL_SIZE; // Offset 89
 
             /**
-             * @brief Constructs a `container` object with a mandatory card effective date.
-             * @param card_effective_date_in_minutes The card's effective date. What to send: A `std::time_t`
-             *                                       value representing the number of **minutes** since the Unix epoch.
-             *                                       This date is the single source of truth for the entire object.
-             * @note The `explicit` keyword prevents implicit conversions (e.g., from an integer),
-             *       which improves type safety.
+             * @brief Default constructor. Creates a `csa::container` in an uninitialized state.
+             * @warning `set_card_effective_date()` must be called before this object can be used
+             *          for time-sensitive operations like parsing.
              */
             container() = default;
 
             /**
-             * @brief Sets the `general` data block for the CSA.
-             * @param gen The `general` object to set.
+             * @brief Sets the card's effective date and propagates it to all time-sensitive child objects.
+             * @details This is the single source of truth for all time calculations. This method **must** be called
+             *          after construction and before any other operations like `parse` or `set_validation`.
+             * @param card_effective_date_in_minutes The card's effective date in minutes since the Unix epoch.
              */
-            void set_general(const general& gen) noexcept {
-                general_ = gen;
+            void set_card_effective_date(const std::time_t card_effective_date_in_minutes) noexcept {
+                card_effective_date_ = card_effective_date_in_minutes;
+                validation_.set_card_effective_date(card_effective_date_in_minutes);
+                history_.set_card_effective_date(card_effective_date_in_minutes);
             }
 
-            /**
-             * @brief Sets the `validation` data block for the CSA.
-             * @param val The `validation` object to set. What to send: A `validation` object whose
-             *            effective date has been set and matches this CSA's effective date.
-             * @throws std::logic_error if the `validation` object's effective date does not match this CSA's.
-             */
+            void set_general(const general& gen) noexcept { general_ = gen; }
+
             void set_validation(const validation& val) {
-                //  This check is now simple, efficient, and correct. It uses the public
-                // getter on the `validation` object instead of a complex and buggy calculation.
-                // This ensures that the child object is consistent with its parent container.
-                if (val.get_card_effective_date() != card_effective_date_) {
+                if (val.get_card_effective_date() != get_card_effective_date())
                     throw std::logic_error("Validation object's effective date does not match CSA's.");
-                }
                 validation_ = val;
             }
 
-            /**
-             * @brief Sets the `history` data block for the CSA.
-             * @param hist The `history` object to set. What to send: A `history` object whose
-             *             effective date has been set and matches this CSA's effective date.
-             * @throws std::logic_error if the `history` object's effective date does not match this CSA's.
-             */
             void set_history(const history& hist) {
-                // This check ensures data consistency between the container and its history object.
-                if (hist.get_card_effective_date() != card_effective_date_)
+                if (hist.get_card_effective_date() != get_card_effective_date())
                     throw std::logic_error("History object's effective date does not match CSA's.");
                 history_ = hist;
             }
 
-            /**
-             * @brief Sets the 7 bytes for the Reserved for Future Use (RFU) field.
-             * @param rfu_data The RFU data. What to send: A `std::array<uint8_t, 7>`.
-             */
             void set_rfu(const std::array<uint8_t, RFU_SIZE>& rfu_data) noexcept {
                 rfu_ = rfu_data;
             }
 
             /**
-             * @brief Parses a 96-byte data vector into a complete `csa::container` object.
+             * @brief Parses a 96-byte data vector into this `csa::container` object.
              * @param data A const reference to a `std::vector` containing exactly 96 bytes.
-             * @param card_effective_date_in_minutes The card's effective date in minutes since epoch, which is
-             *        essential for interpreting all time offsets within the data.
-             * @return A `container` object populated with all parsed data.
+             * @throws std::logic_error if the card's effective date has not been set first via `set_card_effective_date`.
              * @throws std::invalid_argument if the data vector is not exactly 96 bytes.
              */
-            static container parse(const std::vector<uint8_t>& data, const std::time_t card_effective_date_in_minutes) {
+            void parse(const std::vector<uint8_t>& data) {
+                if (!card_effective_date_.has_value())
+                    throw std::logic_error("Card effective date must be set before parsing.");
                 if (data.size() != TOTAL_SIZE)
                     throw std::invalid_argument("Input CSA data must be exactly 96 bytes.");
 
-                // Create a new container with the mandatory effective date.
-                container result(card_effective_date_in_minutes);
-
-                // Delegate parsing for each block to its respective class, passing the correct slice of the data vector.
-                // The use of iterators `{data.begin() + OFFSET, data.begin() + NEXT_OFFSET}` creates a temporary
-                // `std::vector<uint8_t>` for each `parse` function.
-                result.general_ = general::parse({data.begin() + GENERAL_OFFSET, data.begin() + VALIDATION_OFFSET});
-                result.validation_ = validation::parse({data.begin() + VALIDATION_OFFSET, data.begin() + HISTORY_OFFSET}, card_effective_date_in_minutes);
-                result.history_ = history::parse({data.begin() + HISTORY_OFFSET, data.begin() + RFU_OFFSET}, card_effective_date_in_minutes);
-
-                // The final RFU block is a simple array of bytes, so we can copy it directly.
-                std::copy(data.begin() + RFU_OFFSET, data.end(), result.rfu_.begin());
-
-                return result;
+                general_ = general::parse({data.begin() + GENERAL_OFFSET, data.begin() + VALIDATION_OFFSET});
+                validation_ = validation::parse({data.begin() + VALIDATION_OFFSET, data.begin() + HISTORY_OFFSET}, *card_effective_date_);
+                history_ = history::parse({data.begin() + HISTORY_OFFSET, data.begin() + RFU_OFFSET}, *card_effective_date_);
+                std::copy(data.begin() + RFU_OFFSET, data.end(), rfu_.begin());
             }
 
-            /**
-             * @brief Serializes the `csa::container` object into a 96-byte vector.
-             * @return A `std::vector<uint8_t>` containing the complete 96 bytes of serialized data.
-             */
             [[nodiscard]] std::vector<uint8_t> to_bytes() const {
                 std::vector<uint8_t> data;
-                data.reserve(TOTAL_SIZE); // Pre-allocate memory to avoid multiple reallocations.
-
-                // Delegate serialization to each child object and append the resulting bytes in the correct order.
+                data.reserve(TOTAL_SIZE);
                 auto general_data = general_.to_bytes();
                 data.insert(data.end(), general_data.begin(), general_data.end());
-
                 auto validation_data = validation_.to_bytes();
                 data.insert(data.end(), validation_data.begin(), validation_data.end());
-
                 auto history_data = history_.to_bytes();
                 data.insert(data.end(), history_data.begin(), history_data.end());
-
-                // Append the final RFU bytes.
                 data.insert(data.end(), rfu_.begin(), rfu_.end());
-
                 return data;
             }
 
-            //! @brief Gets a mutable reference to the `general` object, allowing direct modification.
             [[nodiscard]] general& get_general() noexcept { return general_; }
-            //! @brief Gets a const reference to the `general` object for read-only access.
             [[nodiscard]] const general& get_general() const noexcept { return general_; }
-
-            //! @brief Gets a mutable reference to the `validation` object, allowing direct modification.
             [[nodiscard]] validation& get_validation() noexcept { return validation_; }
-            //! @brief Gets a const reference to the `validation` object for read-only access.
             [[nodiscard]] const validation& get_validation() const noexcept { return validation_; }
-
-            //! @brief Gets a mutable reference to the `history` object, allowing direct modification.
             [[nodiscard]] history& get_history() noexcept { return history_; }
-            //! @brief Gets a const reference to the `history` object for read-only access.
             [[nodiscard]] const history& get_history() const noexcept { return history_; }
-
-            //! @brief Gets a const reference to the 7-byte RFU data array.
             [[nodiscard]] const std::array<uint8_t, RFU_SIZE>& get_rfu() const noexcept { return rfu_; }
-            //! @brief Gets the card effective date that this container was initialized with.
-            [[nodiscard]] std::time_t get_card_effective_date() const noexcept { return card_effective_date_; }
 
             /**
-             * @brief Stream insertion operator for easy printing of `container` objects.
-             * @details This operator delegates the printing of each sub-block to that block's
-             *          own stream operator, resulting in a clean, fully detailed output.
+             * @brief Gets the card effective date associated with this container.
+             * @return The effective date in minutes since the Unix epoch.
+             * @throws std::logic_error if the effective date has not been set via `set_card_effective_date`.
              */
+            [[nodiscard]] std::time_t get_card_effective_date() const {
+                if (!card_effective_date_.has_value()) {
+                    throw std::logic_error("Card effective date has not been set.");
+                }
+                return *card_effective_date_;
+            }
+
             friend std::ostream& operator<<(std::ostream& os, const container& obj) {
                 os << "======================= COMMON SERVICE AREA (CSA) =======================" << std::endl;
                 os << obj.general_ << std::endl;
                 os << obj.validation_ << std::endl;
                 os << obj.history_ << std::endl;
                 os << "-------------------------- RFU (7 Bytes) --------------------------" << std::endl << "  ";
-                // Print the raw hex values for the RFU block.
                 for (const auto& byte : obj.rfu_) {
                     os << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte) << " ";
                 }
-                os << std::dec << std::endl; // Reset stream to decimal for subsequent prints.
+                os << std::dec << std::endl;
                 os << "=======================================================================";
                 return os;
             }
 
-            /**
-             * @brief Compares two `container` objects for equality.
-             * @return True if all corresponding members and child objects are identical, false otherwise.
-             */
             friend bool operator==(const container& lhs, const container& rhs) {
-                // This deep comparison relies on the `operator==` implementation of each child class.
                 return lhs.card_effective_date_ == rhs.card_effective_date_ &&
                        lhs.general_ == rhs.general_ &&
                        lhs.validation_ == rhs.validation_ &&
@@ -1594,19 +1530,12 @@ namespace open_loop {
             }
 
         private:
-
-            //! The general data block (2 bytes).
             general general_{};
-            //! The last validation record (19 bytes).
             validation validation_{};
-            //! The historical transaction log records (68 bytes).
             history history_{};
-            //! The 7-byte reserved data block.
             std::array<uint8_t, RFU_SIZE> rfu_{};
-            //! The single source of truth for all time calculations, stored in minutes since epoch.
-            //! This member is NOT part of the serialized 96 bytes but is crucial for the object's logic.
-            std::time_t card_effective_date_{};
-
+            // The effective date is now optional, as it's not set at construction.
+            std::optional<std::time_t> card_effective_date_;
         };
 
     }
@@ -2686,12 +2615,9 @@ namespace open_loop {
          * @class container
          * @brief Represents the complete Operator Service Area (OSA) within a 96-byte block.
          *
-         * @details This class is the top-level wrapper that orchestrates all OSA components:
-         *          `general`, `validation` (a `transaction_record`), a reduced-size `history`,
-         *          and multiple `trip_pass` slots. It manages the serialization to and parsing
-         *          from a fixed 96-byte block, automatically handling the padding required to
-         *          fill the unused space. This structure is optimized to carry multiple fare
-         *          products (passes) at the cost of a shorter transaction history.
+         * @details This class is the top-level wrapper that orchestrates all OSA components.
+         *          It is designed to be created with a default constructor and then configured using
+         *          public setter methods. This approach allows for deferred initialization.
          *
          *          The 96-byte layout is as follows:
          *          - **Bytes 0-6**: `general` data (7 bytes)
@@ -2701,102 +2627,82 @@ namespace open_loop {
          *          - **Bytes 66-85**: `trip_pass` Slot 2 (20 bytes)
          *          - **Bytes 86-95**: Padding (10 bytes)
          *
-         * @warning An object of this class **must** be constructed with a `card_effective_date`, which
-         *          governs all time-based calculations and ensures data consistency across its child objects.
+         * @warning Before performing any time-based operations (like parsing or setting transaction times),
+         *          you **must** call `set_card_effective_date()`. This date governs all time-based
+         *          calculations and is essential for the object to function correctly. Failure to do so
+         *          will result in a `std::logic_error`.
          *
          * @usage
          * @code
-         *     // 1. Define the card's effective date in minutes since the Unix epoch.
+         *     // 1. Create the main OSA container using the default constructor.
+         *     osa::container my_osa;
+         *
+         *     // 2. CRITICAL: Set the card's effective date. This must be done before parsing or time-setting.
          *     time_t effective_date = 28399680;
+         *     my_osa.set_card_effective_date(effective_date);
          *
-         *     // 2. Create the main OSA container.
-         *     osa::container my_osa(effective_date);
-         *
-         *     // 3. Set components by accessing them through getters and modifying them.
+         *     // 3. Set other components.
          *     my_osa.get_general().set_version(1, 0, 0);
          *     my_osa.get_validation().set_fare(150);
-         *     my_osa.get_trip_pass(0).set_pass_id(101); // Set the first trip pass
          *
          *     // 4. Serialize, parse, and verify.
-         *     std::vector<uint8_t> bytes = my_osa.to_bytes(); // a 96-byte vector
-         *     osa::container parsed_osa = osa::container::parse(bytes, effective_date);
+         *     std::vector<uint8_t> bytes = my_osa.to_bytes();
+         *
+         *     osa::container parsed_osa;
+         *     parsed_osa.set_card_effective_date(effective_date); // Must also be set before parsing.
+         *     parsed_osa.parse(bytes); // Note: parse is now a member function.
+         *
+         *     assert(my_osa == parsed_osa);
          * @endcode
          */
         class container {
         public:
-
-            //! The fixed total size of the OSA block on the card.
             static constexpr size_t BLOCK_SIZE = 96;
-            //! The number of trip pass slots available in this layout.
             static constexpr size_t NUM_TRIP_PASSES = 2;
-
-            // --- Offsets for Data Slicing ---
-            // These constants define the starting position of each data block within the 96-byte array,
-            // making the parsing and serialization logic clear and easy to maintain.
-
-            //! Starting byte of the 'general' data block.
             static constexpr size_t GENERAL_OFFSET = 0;
-            //! Starting byte of the 'validation' data block.
             static constexpr size_t VALIDATION_OFFSET = GENERAL_OFFSET + general::DATA_SIZE; // Offset 7
-            //! Starting byte of the 'history' data block.
             static constexpr size_t HISTORY_OFFSET = VALIDATION_OFFSET + transaction_record::DATA_SIZE; // Offset 20
-            //! Starting byte of the first 'trip_pass' data block.
             static constexpr size_t TRIP_PASS_START_OFFSET = HISTORY_OFFSET + history::TOTAL_SIZE; // Offset 46
-
-            //! The total size of all active data components. Used to calculate padding.
             static constexpr size_t ACTUAL_DATA_SIZE = general::DATA_SIZE +
                                                        transaction_record::DATA_SIZE +
                                                        history::TOTAL_SIZE +
-                                                       (NUM_TRIP_PASSES * trip_pass::DATA_SIZE); // 7+13+26+(2*20) = 86 bytes
-            //! The number of zero-bytes needed to pad the data to the full block size.
-            static constexpr size_t PADDING_SIZE = BLOCK_SIZE - ACTUAL_DATA_SIZE; // 96 - 86 = 10 bytes
+                                                       (NUM_TRIP_PASSES * trip_pass::DATA_SIZE); // 86 bytes
+            static constexpr size_t PADDING_SIZE = BLOCK_SIZE - ACTUAL_DATA_SIZE; // 10 bytes
 
             /**
-             * @brief Constructs an `osa::container` with a mandatory card effective date.
-             * @details This is the only way to create a valid container. The provided date becomes the
-             *          single source of truth for all time-sensitive child objects (`validation` and `history`),
-             *          which are automatically initialized with this date upon construction.
-             * @param card_effective_date_in_minutes The card's effective date. What to send: A `std::time_t`
-             *                                       value representing minutes since the Unix epoch.
+             * @brief Default constructor. Creates an `osa::container` in an uninitialized state.
+             * @warning `set_card_effective_date()` must be called before this object can be used
+             *          for time-sensitive operations like parsing.
              */
             container() = default;
 
-            void set_general(const general& gen) noexcept {
-                general_ = gen;
+            /**
+             * @brief Sets the card's effective date and propagates it to all time-sensitive child objects.
+             * @details This is the single source of truth for all time calculations. This method **must** be called
+             *          after construction and before any other operations like `parse` or `set_validation`.
+             * @param card_effective_date_in_minutes The card's effective date in minutes since the Unix epoch.
+             */
+            void set_card_effective_date(const std::time_t card_effective_date_in_minutes) noexcept {
+                card_effective_date_ = card_effective_date_in_minutes;
+                // Propagate the date to the child objects to ensure the entire container is in a consistent state.
+                validation_.set_card_effective_date(card_effective_date_in_minutes);
+                history_.set_card_effective_date(card_effective_date_in_minutes);
             }
 
-            /**
-             * @brief Sets the `validation` data block for the OSA.
-             * @param val The `transaction_record` object to set as the validation record.
-             *            What to send: A record whose effective date has been set and matches this container's.
-             * @throws std::logic_error if the validation record's effective date does not match this container's,
-             *         which would indicate a critical data consistency issue.
-             */
+            void set_general(const general& gen) noexcept { general_ = gen; }
+
             void set_validation(const transaction_record& val) {
-                if (val.get_card_effective_date() != card_effective_date_)
+                if (val.get_card_effective_date() != get_card_effective_date())
                     throw std::logic_error("Validation record's effective date does not match OSA container's.");
                 validation_ = val;
             }
 
-            /**
-             * @brief Sets the `history` data block for the OSA.
-             * @param hist The `history` object to set. What to send: A history object whose
-             *             effective date has been set and matches this container's.
-             * @throws std::logic_error if the history object's effective date does not match, which would
-             *         indicate a critical data consistency issue.
-             */
             void set_history(const history& hist) {
-                if (hist.get_card_effective_date() != card_effective_date_)
+                if (hist.get_card_effective_date() != get_card_effective_date())
                     throw std::logic_error("History object's effective date does not match OSA container's.");
                 history_ = hist;
             }
 
-            /**
-             * @brief Sets a specific trip pass at the given index.
-             * @param pass The `trip_pass` object to set.
-             * @param index The slot for the pass. What to send: A value from 0 to (NUM_TRIP_PASSES - 1).
-             * @throws std::out_of_range if the index is invalid.
-             */
             void set_trip_pass(const trip_pass& pass, const size_t index) {
                 if (index >= NUM_TRIP_PASSES)
                     throw std::out_of_range("Trip pass index is out of bounds.");
@@ -2804,116 +2710,76 @@ namespace open_loop {
             }
 
             /**
-             * @brief Parses a 96-byte data vector into a complete `osa::container` object.
-             * @details This function slices the 96-byte input vector according to the predefined
-             *          offsets and delegates parsing to each respective child component. Padding
-             *          at the end of the data block is ignored.
+             * @brief Parses a 96-byte data vector into this `osa::container` object.
              * @param data A const reference to a `std::vector` containing exactly 96 bytes.
-             * @param card_effective_date_in_minutes The card's effective date in minutes since epoch.
-             * @return An `osa::container` object populated with all parsed data.
+             * @throws std::logic_error if the card's effective date has not been set first via `set_card_effective_date`.
              * @throws std::invalid_argument if the data vector is not exactly 96 bytes.
              */
-            static container parse(const std::vector<uint8_t>& data, const std::time_t card_effective_date_in_minutes) {
+            void parse(const std::vector<uint8_t>& data) {
+                // Runtime safety check: ensure the object is in a valid state for parsing.
+                if (!card_effective_date_.has_value())
+                    throw std::logic_error("Card effective date must be set before parsing.");
                 if (data.size() != BLOCK_SIZE)
                     throw std::invalid_argument("Input OSA data must be exactly 96 bytes.");
 
-                // Construct the result with the mandatory date. This also correctly initializes sub-objects.
-                container result(card_effective_date_in_minutes);
-
-                // Delegate parsing for each block to its respective class, passing the correct slice of data.
-                result.general_ = general::parse({data.begin() + GENERAL_OFFSET, data.begin() + VALIDATION_OFFSET});
-                result.validation_ = transaction_record::parse({data.begin() + VALIDATION_OFFSET, data.begin() + HISTORY_OFFSET}, card_effective_date_in_minutes);
-                result.history_ = history::parse({data.begin() + HISTORY_OFFSET, data.begin() + TRIP_PASS_START_OFFSET}, card_effective_date_in_minutes);
-
-                // Parse each trip pass slot individually.
+                general_ = general::parse({data.begin() + GENERAL_OFFSET, data.begin() + VALIDATION_OFFSET});
+                validation_ = transaction_record::parse({data.begin() + VALIDATION_OFFSET, data.begin() + HISTORY_OFFSET}, *card_effective_date_);
+                history_ = history::parse({data.begin() + HISTORY_OFFSET, data.begin() + TRIP_PASS_START_OFFSET}, *card_effective_date_);
                 for(size_t i = 0; i < NUM_TRIP_PASSES; ++i) {
                     const auto begin = data.begin() + TRIP_PASS_START_OFFSET + (i * trip_pass::DATA_SIZE);
                     const auto end = begin + trip_pass::DATA_SIZE;
-                    result.trip_passes_[i] = trip_pass::parse({begin, end});
+                    trip_passes_[i] = trip_pass::parse({begin, end});
                 }
-
-                return result;
             }
 
-            /**
-             * @brief Serializes the `osa::container` object into a 96-byte vector.
-             * @details This method serializes all OSA components in order (`general`, `validation`,
-             *          `history`, `trip_pass` array) and then appends zero-byte padding to ensure
-             *          the final output is exactly 96 bytes long.
-             * @return A `std::vector<uint8_t>` containing the complete 96 bytes of serialized data.
-             */
             [[nodiscard]] std::vector<uint8_t> to_bytes() const {
                 std::vector<uint8_t> data;
                 data.reserve(BLOCK_SIZE);
-
-                // Delegate serialization to each child object and append the results in order.
                 auto general_data = general_.to_bytes();
                 data.insert(data.end(), general_data.begin(), general_data.end());
-
                 auto validation_data = validation_.to_bytes();
                 data.insert(data.end(), validation_data.begin(), validation_data.end());
-
                 auto history_data = history_.to_bytes();
                 data.insert(data.end(), history_data.begin(), history_data.end());
-
                 for(size_t i = 0; i < NUM_TRIP_PASSES; ++i) {
                     auto trip_pass_data = trip_passes_[i].to_bytes();
                     data.insert(data.end(), trip_pass_data.begin(), trip_pass_data.end());
                 }
-
-                // Add padding to ensure the final vector is exactly 96 bytes.
                 if constexpr (PADDING_SIZE > 0) {
                     data.insert(data.end(), PADDING_SIZE, 0x00);
                 }
-
                 return data;
             }
 
-            //! @brief Gets a mutable reference to the `general` object, allowing direct modification.
             [[nodiscard]] general& get_general() noexcept { return general_; }
-            //! @brief Gets a const reference to the `general` object for read-only access.
             [[nodiscard]] const general& get_general() const noexcept { return general_; }
-
-            //! @brief Gets a mutable reference to the `validation` record, allowing direct modification.
             [[nodiscard]] transaction_record& get_validation() noexcept { return validation_; }
-            //! @brief Gets a const reference to the `validation` record for read-only access.
             [[nodiscard]] const transaction_record& get_validation() const noexcept { return validation_; }
-
-            //! @brief Gets a mutable reference to the `history` object, allowing direct modification.
             [[nodiscard]] history& get_history() noexcept { return history_; }
-            //! @brief Gets a const reference to the `history` object for read-only access.
             [[nodiscard]] const history& get_history() const noexcept { return history_; }
-
-            //! @brief Gets the card effective date that this container was initialized with.
-            [[nodiscard]] std::time_t get_card_effective_date() const noexcept { return card_effective_date_; }
-
-            /**
-             * @brief Gets a mutable reference to a specific trip pass.
-             * @param index The slot of the pass to retrieve (from 0 to NUM_TRIP_PASSES - 1).
-             * @return A reference to the `trip_pass` object at that index.
-             * @throws std::out_of_range if the index is invalid.
-             */
             [[nodiscard]] trip_pass& get_trip_pass(size_t index) {
-                if (index >= NUM_TRIP_PASSES)
-                    throw std::out_of_range("Trip pass index is out of bounds.");
+                if (index >= NUM_TRIP_PASSES) throw std::out_of_range("Trip pass index is out of bounds.");
+                return trip_passes_[index];
+            }
+            [[nodiscard]] const trip_pass& get_trip_pass(size_t index) const {
+                if (index >= NUM_TRIP_PASSES) throw std::out_of_range("Trip pass index is out of bounds.");
                 return trip_passes_[index];
             }
 
             /**
-             * @brief Gets a const reference to a specific trip pass.
-             * @param index The slot of the pass to retrieve (from 0 to NUM_TRIP_PASSES - 1).
-             * @return A const reference to the `trip_pass` object at that index.
-             * @throws std::out_of_range if the index is invalid.
+             * @brief Gets the card effective date associated with this container.
+             * @return The effective date in minutes since the Unix epoch.
+             * @throws std::logic_error if the effective date has not been set via `set_card_effective_date`.
              */
-            [[nodiscard]] const trip_pass& get_trip_pass(size_t index) const {
-                if (index >= NUM_TRIP_PASSES)
-                    throw std::out_of_range("Trip pass index is out of bounds.");
-                return trip_passes_[index];
+            [[nodiscard]] std::time_t get_card_effective_date() const {
+                if (!card_effective_date_.has_value()) {
+                    throw std::logic_error("Card effective date has not been set.");
+                }
+                return *card_effective_date_;
             }
 
             friend std::ostream& operator<<(std::ostream& os, const container& obj) {
                 os << "==================== OPERATOR SERVICE AREA (OSA) ====================" << std::endl;
-                // Delegate printing to the stream operators of each child object.
                 os << obj.general_ << std::endl;
                 os << obj.validation_ << std::endl;
                 os << obj.history_ << std::endl;
@@ -2927,7 +2793,6 @@ namespace open_loop {
             }
 
             friend bool operator==(const container& lhs, const container& rhs) {
-                // Delegate comparison to the equality operators of each child object.
                 return lhs.general_ == rhs.general_ &&
                        lhs.validation_ == rhs.validation_ &&
                        lhs.history_ == rhs.history_ &&
@@ -2936,19 +2801,12 @@ namespace open_loop {
             }
 
         private:
-
-            //! The general data block (7 bytes).
             general general_{};
-            //! The last validation record (13 bytes).
             transaction_record validation_{};
-            //! The historical transaction records (26 bytes).
             history history_{};
-            //! An array holding the trip pass products (2 slots * 20 bytes = 40 bytes).
             std::array<trip_pass, NUM_TRIP_PASSES> trip_passes_{};
-            //! The single source of truth for all time calculations, stored in minutes since epoch.
-            //! This member is NOT part of the serialized 96 bytes but is crucial for the object's logic.
-            std::time_t card_effective_date_{};
-
+            // The effective date is now optional, as it's not set at construction.
+            std::optional<std::time_t> card_effective_date_;
         };
 
     }
